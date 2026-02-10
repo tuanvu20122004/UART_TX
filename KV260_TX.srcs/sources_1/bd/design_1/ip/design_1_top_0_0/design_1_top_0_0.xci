@@ -9,16 +9,14 @@
     "parameters": {
       "component_parameters": {
         "CLK_FREQ_HZ": [ { "value": "100000000", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "BAUDRATE": [ { "value": "115200", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "GAP_MS": [ { "value": "500", "resolve_type": "user", "format": "long", "usage": "all" } ],
-        "POR_MS": [ { "value": "50", "resolve_type": "user", "format": "long", "usage": "all" } ],
+        "BAUDRATE": [ { "value": "921600", "resolve_type": "user", "format": "long", "usage": "all" } ],
+        "PAYLOAD_LEN": [ { "value": "100", "resolve_type": "user", "format": "long", "usage": "all" } ],
         "Component_Name": [ { "value": "design_1_top_0_0", "resolve_type": "user", "usage": "all" } ]
       },
       "model_parameters": {
         "CLK_FREQ_HZ": [ { "value": "100000000", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "BAUDRATE": [ { "value": "115200", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "GAP_MS": [ { "value": "500", "resolve_type": "generated", "format": "long", "usage": "all" } ],
-        "POR_MS": [ { "value": "50", "resolve_type": "generated", "format": "long", "usage": "all" } ]
+        "BAUDRATE": [ { "value": "921600", "resolve_type": "generated", "format": "long", "usage": "all" } ],
+        "PAYLOAD_LEN": [ { "value": "100", "resolve_type": "generated", "format": "long", "usage": "all" } ]
       },
       "project_parameters": {
         "ARCHITECTURE": [ { "value": "zynquplus" } ],
@@ -49,7 +47,22 @@
     "boundary": {
       "ports": {
         "clk_in": [ { "direction": "in" } ],
+        "rst_n": [ { "direction": "in" } ],
         "uart_tx": [ { "direction": "out" } ]
+      },
+      "interfaces": {
+        "rst_n": {
+          "vlnv": "xilinx.com:signal:reset:1.0",
+          "abstraction_type": "xilinx.com:signal:reset_rtl:1.0",
+          "mode": "slave",
+          "parameters": {
+            "POLARITY": [ { "value": "ACTIVE_LOW", "value_src": "constant", "value_permission": "bd_and_user", "usage": "all" } ],
+            "INSERT_VIP": [ { "value": "0", "resolve_type": "user", "format": "long", "usage": "simulation.rtl", "is_ips_inferred": true, "is_static_object": false } ]
+          },
+          "port_maps": {
+            "RST": [ { "physical_name": "rst_n" } ]
+          }
+        }
       }
     }
   }

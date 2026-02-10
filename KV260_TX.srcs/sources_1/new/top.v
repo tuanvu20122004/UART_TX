@@ -2,53 +2,26 @@
 
 module top #(
     parameter integer CLK_FREQ_HZ = 100_000_000,
-    parameter integer BAUDRATE    = 115200,
-    parameter integer GAP_MS      = 500,
-    parameter integer POR_MS      = 50
+    parameter integer BAUDRATE    = 921600,   // ??t gi?ng PC
+    parameter integer PAYLOAD_LEN = 100
 )(
     input  wire clk_in,
+    input  wire rst_n,      // t? PS: pl_resetn0 (active-low)
     output wire uart_tx
 );
 
-    // ---------------- POR ----------------
-    localparam integer POR_CLKS = (CLK_FREQ_HZ/1000) * POR_MS;
-    localparam integer POR_W    = (POR_CLKS <= 1) ? 1 : $clog2(POR_CLKS);
-
-    reg [POR_W-1:0] por_cnt = {POR_W{1'b0}};
-    wire rst_int = (POR_CLKS <= 1) ? 1'b0 : (por_cnt != POR_CLKS-1);
-
+    // reset n?i b? active-high, synchronous
+    reg rst_ff1 = 1'b1, rst_ff2 = 1'b1;
     always @(posedge clk_in) begin
-        if (POR_CLKS > 1) begin
-            if (por_cnt != POR_CLKS-1)
-                por_cnt <= por_cnt + 1'b1;
-        end
+        rst_ff1 <= ~rst_n;
+        rst_ff2 <= rst_ff1;
     end
+    wire rst_int = rst_ff2;
 
-    // ---------------- GAP ----------------
-    localparam integer GAP_CLKS = (CLK_FREQ_HZ/1000) * GAP_MS;
-    localparam integer GAP_W    = (GAP_CLKS <= 1) ? 1 : $clog2(GAP_CLKS);
-    reg [GAP_W-1:0] gap_cnt = {GAP_W{1'b0}};
+    // Frame length: AA 55 + LEN + payload + CRC32
+    localparam integer FRAME_LEN = 2 + 1 + PAYLOAD_LEN + 4; // 107
 
-    // ---------------- MSG ----------------
-    localparam integer MSG_LEN = 7;
-
-    function [7:0] msg_byte;
-        input [2:0] i;
-        begin
-            case (i)
-                3'd0: msg_byte = "H";
-                3'd1: msg_byte = "E";
-                3'd2: msg_byte = "L";
-                3'd3: msg_byte = "L";
-                3'd4: msg_byte = "O";
-                3'd5: msg_byte = 8'h0D;
-                3'd6: msg_byte = 8'h0A;
-                default: msg_byte = 8'h00;
-            endcase
-        end
-    endfunction
-
-    // ---------------- UART TX ----------------
+    // ---------------- UART TX core ----------------
     reg        tx_valid = 1'b0;
     reg [7:0]  tx_data  = 8'h00;
     wire       tx_busy;
@@ -65,59 +38,118 @@ module top #(
         .tx_busy  (tx_busy)
     );
 
-    // ---------------- FSM: WAIT -> LOAD -> PULSE ----------------
-    localparam [1:0] S_WAIT  = 2'd0;
-    localparam [1:0] S_LOAD  = 2'd1;
-    localparam [1:0] S_PULSE = 2'd2;
+    // ---------------- Payload buffer ----------------
+    reg [7:0] payload_mem [0:PAYLOAD_LEN-1];
 
-    reg [1:0] state = S_WAIT;
-    reg [2:0] idx   = 3'd0;
+    // ---------------- CRC32 (reflected) ----------------
+    function automatic [31:0] crc32_update;
+        input [31:0] crc_in;
+        input [7:0]  data;
+        integer k;
+        reg [31:0] c;
+        begin
+            c = crc_in ^ data;
+            for (k = 0; k < 8; k = k + 1) begin
+                if (c[0]) c = (c >> 1) ^ 32'hEDB88320;
+                else      c = (c >> 1);
+            end
+            crc32_update = c;
+        end
+    endfunction
+
+    reg [31:0] crc_work  = 32'hFFFFFFFF;
+    reg [31:0] crc_final = 32'h0;
+
+    // ---------------- Simple payload generator (LFSR) ----------------
+    reg [31:0] lfsr = 32'h1ACE_B00C;
+    wire lfsr_fb = lfsr[0] ^ lfsr[1] ^ lfsr[21] ^ lfsr[31];
+
+    // ---------------- Frame byte mux ----------------
+    function automatic [7:0] frame_byte;
+        input [7:0] i;
+        begin
+            if (i == 8'd0) frame_byte = 8'hAA;
+            else if (i == 8'd1) frame_byte = 8'h55;
+            else if (i == 8'd2) frame_byte = PAYLOAD_LEN[7:0];
+            else if (i >= 8'd3 && i < (8'd3 + PAYLOAD_LEN)) begin
+                frame_byte = payload_mem[i - 8'd3];
+            end else begin
+                case (i - (8'd3 + PAYLOAD_LEN))
+                    8'd0: frame_byte = crc_final[7:0];
+                    8'd1: frame_byte = crc_final[15:8];
+                    8'd2: frame_byte = crc_final[23:16];
+                    8'd3: frame_byte = crc_final[31:24];
+                    default: frame_byte = 8'h00;
+                endcase
+            end
+        end
+    endfunction
+
+    // ---------------- FSM: GEN -> SEND (liên t?c, không GAP) ----------------
+    localparam [1:0] S_GEN        = 2'd0;
+    localparam [1:0] S_SEND_LOAD  = 2'd1;
+    localparam [1:0] S_SEND_PULSE = 2'd2;
+
+    reg [1:0] state = S_GEN;
+    reg [6:0] gen_idx  = 7'd0; // 0..PAYLOAD_LEN-1
+    reg [7:0] send_idx = 8'd0; // 0..FRAME_LEN-1
 
     always @(posedge clk_in) begin
         if (rst_int) begin
-            state    <= S_WAIT;
-            idx      <= 3'd0;
-            gap_cnt  <= {GAP_W{1'b0}};
-            tx_valid <= 1'b0;
-            tx_data  <= 8'h00;
+            state     <= S_GEN;
+            gen_idx   <= 7'd0;
+            send_idx  <= 8'd0;
+            tx_valid  <= 1'b0;
+            tx_data   <= 8'h00;
+            lfsr      <= 32'h1ACE_B00C;
+            crc_work  <= 32'hFFFFFFFF;
+            crc_final <= 32'h0;
         end else begin
-            tx_valid <= 1'b0; // pulse 1 clock
+            tx_valid <= 1'b0;
 
             case (state)
-                S_WAIT: begin
-                    if (GAP_CLKS <= 1) begin
-                        idx   <= 3'd0;
-                        state <= S_LOAD;
-                    end else if (gap_cnt == GAP_CLKS-1) begin
-                        gap_cnt <= {GAP_W{1'b0}};
-                        idx     <= 3'd0;
-                        state   <= S_LOAD;
+                // generate payload 1 byte/clock + update crc
+                S_GEN: begin
+                    payload_mem[gen_idx] <= lfsr[7:0];
+                    crc_work <= crc32_update(crc_work, lfsr[7:0]);
+                    lfsr <= {lfsr_fb, lfsr[31:1]};
+
+                    if (gen_idx == PAYLOAD_LEN-1) begin
+                        // finalize CRC after last payload byte
+                        crc_final <= (crc32_update(crc_work, lfsr[7:0]) ^ 32'hFFFFFFFF);
+                        send_idx  <= 8'd0;
+                        gen_idx   <= 7'd0;
+                        crc_work  <= 32'hFFFFFFFF;
+                        state     <= S_SEND_LOAD;
                     end else begin
-                        gap_cnt <= gap_cnt + 1'b1;
+                        gen_idx <= gen_idx + 1'b1;
                     end
                 end
 
-                S_LOAD: begin
+                // load byte when uart idle
+                S_SEND_LOAD: begin
                     if (!tx_busy) begin
-                        tx_data <= msg_byte(idx); // n?p tr??c
-                        state   <= S_PULSE;
+                        tx_data <= frame_byte(send_idx);
+                        state   <= S_SEND_PULSE;
                     end
                 end
 
-                S_PULSE: begin
+                // pulse valid then advance index
+                S_SEND_PULSE: begin
                     if (!tx_busy) begin
-                        tx_valid <= 1'b1; // chu k? sau m?i kick
-                        if (idx == MSG_LEN-1) begin
-                            idx   <= 3'd0;
-                            state <= S_WAIT;
+                        tx_valid <= 1'b1;
+
+                        if (send_idx == FRAME_LEN-1) begin
+                            send_idx <= 8'd0;
+                            state    <= S_GEN;        // g?i liên t?c, không WAIT
                         end else begin
-                            idx   <= idx + 1'b1;
-                            state <= S_LOAD;
+                            send_idx <= send_idx + 1'b1;
+                            state    <= S_SEND_LOAD;
                         end
                     end
                 end
 
-                default: state <= S_WAIT;
+                default: state <= S_GEN;
             endcase
         end
     end

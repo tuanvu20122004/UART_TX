@@ -1176,6 +1176,16 @@
               }
             }
           },
+          "rst_n": {
+            "type": "rst",
+            "direction": "I",
+            "parameters": {
+              "POLARITY": {
+                "value": "ACTIVE_LOW",
+                "value_src": "constant"
+              }
+            }
+          },
           "uart_tx": {
             "direction": "O"
           }
@@ -1193,6 +1203,12 @@
         "ports": [
           "zynq_ultra_ps_e_0/pl_clk0",
           "top_0/clk_in"
+        ]
+      },
+      "zynq_ultra_ps_e_0_pl_resetn0": {
+        "ports": [
+          "zynq_ultra_ps_e_0/pl_resetn0",
+          "top_0/rst_n"
         ]
       }
     }
